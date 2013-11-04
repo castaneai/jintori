@@ -1,3 +1,4 @@
 #!/bin/sh
 gcc client.c -o client.out
-./client
+gcc ncur.c -o ncur.out -lncurses
+./ncur.out
