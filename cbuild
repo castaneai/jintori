@@ -1,0 +1,4 @@
+#!/bin/sh
+gcc client.c -o client.out -lncurses -lpthread
+./client.out
+rm client.out
