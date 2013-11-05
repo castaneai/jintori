@@ -1,4 +1,3 @@
 #!/bin/sh
 gcc server.c -o server.out
-./server.out 10800
-rm server.out
+./server.out 10800 || rm server.out

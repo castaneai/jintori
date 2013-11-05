@@ -4,8 +4,8 @@
 #define PLAYER_MAX 4
 #define MAP_WIDTH 50
 #define MAP_HEIGHT 20
-#define GAME_TIME 30
-#define MAP_SEND_INTERVAL 200
+#define GAME_TIME 3000
+#define MAP_SEND_INTERVAL 120 
 
 typedef enum _Color{
     EMPTY,
