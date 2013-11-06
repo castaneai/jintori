@@ -42,7 +42,7 @@ typedef struct
 typedef struct
 {
     Color color;
-    int tile_count;
+    int tile_count; // 取った陣の数
 } ScoreData;
 
 /**
@@ -105,7 +105,6 @@ void init_ncurses()
     noecho();
     curs_set(0); // カーソル非表示
     keypad(stdscr, TRUE); // 十字キーを有効化
-    nodelay(stdscr, TRUE); // getchなどの入力関数を非同期にする
 
     start_color(); // 色を有効化
     init_pair(1, COLOR_WHITE, COLOR_RED);
@@ -207,7 +206,6 @@ int recv_complete(int sock, char* buf, int length)
             return FALSE;
         }
         total_read_count += recv_result;
-        refresh();
     }
     return TRUE;
 }
@@ -222,9 +220,12 @@ void recv_result_scores(int sock, ScoreData sorted_scores[])
     int i, k;
     int temp;
     short scores[PLAYER_MAX];
-    read(sock, scores, sizeof(scores));
-    int sorted_colors[] = {0, 1, 2, 3};
+    int sorted_colors[] = {1, 2, 3, 4};
 
+    // サーバーからソートされていない結果データを受け取る
+    read(sock, scores, sizeof(scores));
+
+    // バブルソート
     for (i = 0; i < PLAYER_MAX - 1; i++) {
         for (k = 0; k <PLAYER_MAX - 1; k++) {
             if (scores[k] < scores[k+1]) {
@@ -239,8 +240,9 @@ void recv_result_scores(int sock, ScoreData sorted_scores[])
         }
     }
 
+    // ソートされた成績データ配列を作る
     for (i = 0; i < PLAYER_MAX; i++) {
-        sorted_scores[i].color = sorted_colors[i] + 1;
+        sorted_scores[i].color = sorted_colors[i];
         sorted_scores[i].tile_count = scores[i];
     }
 }
@@ -286,12 +288,16 @@ void show_my_color(Color color)
     mvprintw(5, MAP_WIDTH + 2, "<= your color");
 }
 
+/**
+ * ゲーム結果を表示する
+ * @param score_data ゲーム結果
+ * @param my_color 自身の色
+ */
 void show_result(ScoreData score_data[], Color my_color)
 {
     int i;
 
     erase();
-    refresh();
     mvprintw(9, 10, "FINISH GAME!!");
     for (i = 0; i < PLAYER_MAX; i++) {
         mvprintw(11+i, 8, "%d ", i+1);
@@ -326,6 +332,8 @@ void start_game(int sock, const StartData* start_data)
     is_playing = 1;
     pthread_create(&draw_thread_id, NULL, (void*)draw_map_thread, &sock);
 
+    // getchなどの入力関数を非同期にする
+    nodelay(stdscr, TRUE); 
     // ゲームプレイ中はずっと入力を待ち続ける（いわゆるゲームループ）
     while (is_playing) {
         dir = input_dir();
@@ -333,6 +341,9 @@ void start_game(int sock, const StartData* start_data)
             send_move(sock, dir);
         }
     } 
+    // 描画スレッドの終了を待機
+    pthread_join(draw_thread_id, NULL);
+
     // ゲームが終了したので入力を同期処理に戻す
     nodelay(stdscr, FALSE);
 
@@ -345,6 +356,7 @@ void start_game(int sock, const StartData* start_data)
     // Enterキーが押されるまで待機
     getstr(trash_buf);
 
+    // ncurses終了
     exit_ncurses();
 }
 
@@ -381,10 +393,8 @@ int connect_server(const char* ip_addr, unsigned short server_port)
  */
 void wait_game_start(int sock)
 {
-    char command;
-    read(sock, &command, 1);
     // ゲーム開始の合図以外が最初に来てしまったらエラーを出して終了する
-    if (command != START_GAME) {
+    if (recv_command(sock) != START_GAME) {
         perror("wait start game");
         exit(1);
     }
