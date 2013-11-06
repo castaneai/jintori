@@ -1,3 +1,4 @@
+
 /**
  * UNIXソケットサーバー
  */
@@ -20,6 +21,14 @@
 #define DEFAULT_LISTEN_BACKLOG 5 // listenする際の標準の受入数
 
 
+typedef struct _GameObject{
+	unsigned char map[MAP_HEIGHT][MAP_WIDTH];
+	Position *player_position;
+	int player_num;
+} GameObject;
+GameObject game_obj;
+
+
 /*
  * Mapに値をセットする
  */
@@ -38,39 +47,40 @@ void printMap(unsigned char map[MAP_HEIGHT][MAP_WIDTH]){
 		for(j = 0;j < MAP_WIDTH;j++){
 			a = (map[i][j] - 1) % PLAYER_MAX;
             b = ((map[i][j] - 1) / PLAYER_MAX) * PLAYER_MAX;
-            printf("%c", (map[i][j] != 0)? colorMap[a+b]:'.');
+            //printf("%c", (map[i][j] != 0)? colorMap[a+b]:'.');
 		}
-		printf("\n");
+		//printf("\n");
 	}
 }
 
 /*
  * 移動用関数
  * */
-void move(unsigned char map[MAP_HEIGHT][MAP_WIDTH], int color, Position *pos, Direction direction){
+void move(int color, Direction direction){
 	unsigned char to;
-	map[pos->y][pos->x] = color + PLAYER_MAX + 1;
+	Position *pos = &(game_obj.player_position[color]);
+	game_obj.map[pos->y][pos->x] = color + PLAYER_MAX + 1;
 	switch (direction){
 		case LEFT:
-		   	to = map[pos->y][pos->x - 1];
+		   	to = game_obj.map[pos->y][pos->x - 1];
 			if(pos->x > 0 && (to < PLAYER_MAX*2+1)) pos->x--;
 			break;
 		case UP:
-		   	to = map[pos->y - 1][pos->x];
+		   	to = game_obj.map[pos->y - 1][pos->x];
 			if(pos->y > 0 && (to < PLAYER_MAX*2+1)) pos->y--;
 			break;
 		case RIGHT:
-		   	to = map[pos->y][pos->x + 1];
+		   	to = game_obj.map[pos->y][pos->x + 1];
 			if(pos->x < MAP_WIDTH-1 && (to < PLAYER_MAX*2+1)) pos->x++;
 			break;
 		case DOWN:
-		   	to = map[pos->y + 1][pos->x];
+		   	to = game_obj.map[pos->y + 1][pos->x];
 			if(pos->y < MAP_HEIGHT - 1 && (to < PLAYER_MAX*2+1)) pos->y++;
 			break;
         default:
             break;
 	}
-	map[pos->y][pos->x] = color + PLAYER_MAX*2 + 1;
+	game_obj.map[pos->y][pos->x] = color + PLAYER_MAX*2 + 1;
 }
 
 /**
@@ -82,29 +92,6 @@ void error(const char* message)
     exit(1);
 }
 
-/**
- * 指定したソケットに文字を書き込み，最後に改行を入れる
- */
-int write_line(int socket, const char* message)
-{
-    int result = 0;
-    result += write(socket, message, strlen(message));
-    result += write(socket, "\r\n", 2);
-    return result;
-}
-
-/**
- * 接続してきたひとりのクライアントを処理する
- * @param client_socket 接続してきたクライアントのソケット
- * @param client_address 接続してきたクライアントのアドレス
- */
-void process_client(int client_socket, struct sockaddr_in* client_address)
-{
-    write_line(client_socket, "HTTP/1.0 200 OK");
-    write_line(client_socket, "text/html");
-    write_line(client_socket, "\r\n");
-    write_line(client_socket, "やっはろー");
-}
 
 /**
  * ソケットに指定されたポート番号をBINDする
@@ -142,60 +129,57 @@ void bind_socket(int socket, unsigned short port)
 }
 
 /**
- * サーバーを開始する
- * @param port 待ち受けポート番号
+ * コマンドを送信する
  */
-void start_server(unsigned short port)
-{
-    int result;
-    int server_socket;
-	int server_local_socket;
-    int client_sockets[PLAYER_MAX];
-	char client_buf[PLAYER_MAX][10];
-	int client_recv_len[PLAYER_MAX];
-    struct sockaddr_in client_address;
-    unsigned int client_address_length;
-    int forked_pid;
-	char player_num = 0;
-	int i, j, k;
-	int mode = 1;
-	int temp = 0;
-	Position player_position[] = {{0,0},{10,0},{0,10},{10,10},{5,5}};
-	unsigned char map[MAP_HEIGHT][MAP_WIDTH];
-	int debug = 0;
-	struct timeval time;
-	time_t start_sec;
-    long before_map_send;
-    
+int send_command(Command command, int socket, char *buf, int length){
+    send(socket, &command, 1, 0);
+    return send(socket, buf, length, 0);
+}
 
-	//マップを初期化する
-	for(i = 0;i < MAP_HEIGHT;i++){
-		for(j = 0;j < MAP_WIDTH;j++){
-			map[i][j] = 0x0;
-			for(k = 0;k < PLAYER_MAX;k++){
-				if(player_position[k].x == j && player_position[k].y == i){
-					map[i][j] = k + PLAYER_MAX * 2 + 1;
-				}	
+
+/**
+ * コマンドを受信する
+ */
+
+int recv_command(int sockets[]){
+	static int remain = 0;
+	static char buf[PLAYER_MAX][10];
+	static int command_remain[PLAYER_MAX] = {0,0,0,0};
+	int temp;
+	int i, j;
+	for(i = 0;i < PLAYER_MAX;i++){
+		if(command_remain[i] == 0){
+			temp = recv(sockets[i], buf[i], 1, 0);
+			if(temp > 0){
+				command_remain[i] = 1;
 			}
 		}
-	}
-	//recv_lenを初期化する
-	for(i = 0;i < PLAYER_MAX;i++){
-		client_recv_len[i] = 0;
-	}
+		if(command_remain[i]){
+			switch ((Command)buf[i][0]){
+				case SEND_DIRECTION:
+					temp = recv(sockets[i], buf[i]+1, 1, 0);
+					if(temp > 0){
+						move(i, (Direction)buf[i][1]);
+						command_remain[i] = 0;
+						//printMap(game_obj.map);
+					}
+					break;
+				default:
+					break;
+			}
+		}
 
-    // 受け入れ用のサーバソケットを作る
+	}
+	return 0;
+}
+
+int init_server(port){
+	int server_socket; // 受け入れ用のサーバソケットを作る
+	int result;
     server_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (server_socket == ERROR) {
         error("create server_socket");
     }
-
-	//子プロセスとの通信ようソケット
-	server_local_socket = socket(AF_INET, SOCK_STREAM, 0);
-	if(server_local_socket == ERROR){
-		error("create server_local_socket");
-	}
-
     bind_socket(server_socket, port);
 	printf("bind to port: %d ok.\n", port);
 
@@ -203,76 +187,132 @@ void start_server(unsigned short port)
 	if (result == ERROR) {
 		close(server_socket);
 		error("listen");
+	};
+	return server_socket;
+}
+
+void init_map(){
+	int i,x,y;
+	memset(game_obj.map, 0, MAP_HEIGHT * MAP_WIDTH);
+	for(i = 0;i < PLAYER_MAX;i++){
+		x = game_obj.player_position[i].x;
+		y = game_obj.player_position[i].y;
+		game_obj.map[y][x] = i + PLAYER_MAX * 2 + 1; 
 	}
-	printf("listen ok.\n");
-	while(player_num < PLAYER_MAX){
-		client_sockets[player_num] = accept(
+}
+
+/*
+ * プレイヤーを受け付ける
+ * */
+int accept_player(int server_socket, int *client_sockets){
+	int i = 0, mode;
+	char buf[3];
+    struct sockaddr_in client_address;
+    unsigned int client_address_length = sizeof(client_address);
+	while(i < PLAYER_MAX){
+		client_sockets[i] = accept(
 				server_socket,
 				(struct sockaddr*)&client_address,
 				&client_address_length);
-		if (client_sockets[player_num] == ERROR) {
+		if (client_sockets[i] == ERROR) {
 			close(server_socket);
 			error("accept");
 		}else{
-			printf("accept ok.(accepted socket=%d)\n", client_sockets[player_num]);
-			write(client_sockets[player_num], &player_num, 1);
-			write(client_sockets[player_num], &(player_position[player_num].x), 1);
-			write(client_sockets[player_num], &(player_position[player_num].y), 1);
+			printf("accept ok.(accepted socket=%d)\n", client_sockets[i]);
+			buf[0] = i;
+			buf[1] = game_obj.player_position[i].x;
+			buf[2] = game_obj.player_position[i].y;
+			send_command(REGISTER_PLAYER, client_sockets[i], buf, 3);
 			mode = 1;
-			ioctl(client_sockets[player_num], FIONBIO, &mode);
+			ioctl(client_sockets[i], FIONBIO, &mode);
 		}
-		player_num++;
+		i++;
 	}
 
-	printf("4人きたよ\n");
-	printMap(map);
+	return 0;
+}
 
+int getmillisecond(){
+	struct timeval time;
 	gettimeofday(&time, NULL);
-	start_sec = time.tv_sec;
-    before_map_send = 0;
-	while(1){
-		gettimeofday(&time,NULL);
-		if(time.tv_sec - start_sec > GAME_TIME){
-			printf("ゲーム終了です.\n");
-			for(i = 0;i < PLAYER_MAX;i++){
-				send(client_sockets[i], "\x1fゲーム終了です.", sizeof("\x1fゲーム終了です."),0);
+	return (time.tv_sec*1000+time.tv_usec/1000);
+}
+
+
+
+void finish_game(int *client_sockets){
+	int i,j;
+	short count[PLAYER_MAX] = {0,0,0,0};
+
+	for(i = 0;i < MAP_HEIGHT;i++){
+		for(j = 0;j < MAP_WIDTH;j++){
+			if(game_obj.map[i][j] != 0){
+				count[(game_obj.map[i][j]-1) % PLAYER_MAX]++;
 			}
+		}
+	}
+	
+	for(i = 0;i < PLAYER_MAX;i++){
+		send_command(FINISH_GAME, client_sockets[i], (char *)count, 8);
+	}
+		
+
+}
+
+/**
+ * サーバーを開始する
+ * @param port 待ち受けポート番号
+ */
+void start_server(unsigned short port)
+{
+	int server_socket;
+    int client_sockets[PLAYER_MAX];
+	char player_num = 0;
+	int i, j;
+	Position player_position[] = {{0,0},{10,0},{0,10},{10,10},{5,5}};
+	int start_time;
+    int last_send_time;
+	int now_time;
+	game_obj.player_position = (Position *)&player_position;
+	game_obj.player_num = PLAYER_MAX; 
+
+	//マップを初期化する
+	init_map();
+
+	// 受け入れ用のサーバソケットを作る
+	server_socket = init_server(port);    
+
+	printf("listen ok.\n");	
+	
+	accept_player(server_socket, client_sockets);
+	
+	printf("4人きたよ\n");
+	
+	printMap(game_obj.map);
+
+	start_time = getmillisecond();
+	last_send_time = start_time;
+
+	for(i = 0;i < PLAYER_MAX;i++){
+		send_command(START_GAME, client_sockets[i], "", 0);	
+		send_command(SEND_MAP, client_sockets[i], (char *)game_obj.map, MAP_HEIGHT*MAP_WIDTH);
+	}
+
+	while(1){	
+		now_time = getmillisecond();
+		if(now_time - start_time > GAME_TIME){
+			printf("ゲーム終了です.\n");
+			finish_game(client_sockets);
 			break;
 		}
-        if(before_map_send == 0 || (time.tv_sec*1000+time.tv_usec/1000) - before_map_send > MAP_SEND_INTERVAL){
+        if(now_time - last_send_time > MAP_SEND_INTERVAL){
             for(i = 0;i < PLAYER_MAX;i++){
-                for(j = 0;j < MAP_HEIGHT;j++){
-                    for(k = 0;k < MAP_WIDTH;k++){
-                        send(client_sockets[i], &map[j][k], 1, 0);
-                    }
-                }
-                //send(client_sockets[i], map, MAP_HEIGHT*MAP_WIDTH, 0);
+				send_command(SEND_MAP, client_sockets[i], (char *)game_obj.map, MAP_HEIGHT*MAP_WIDTH);
             }
-            //printf("map送信\n");
-            before_map_send = (time.tv_sec*1000+time.tv_usec/1000);
+            last_send_time = now_time;
         }
 
-		for(i = 0;i < PLAYER_MAX;i++){
-			temp = recv(client_sockets[i],client_buf[i]+client_recv_len[i], 10, 0); 
-			if(temp < 1){
-				if(errno != EAGAIN){
-					//printf("player%dとの接続が切れました.\n",i);
-				}else{
-				}
-			}else{
-				temp += client_recv_len[i];
-				for(j = 0;j < (temp / 2);j++){
-					move(map, i, &player_position[i], (Direction)client_buf[i][j*2+1]);
-				}
-				if(temp % 2 != 0){
-					client_buf[i][0] = client_buf[i][j*2];
-					client_recv_len[i] = 1;
-				}else{
-					client_recv_len[i] = 0;
-				}
-				printMap(map);
-			}
-		}
+		recv_command(client_sockets);
 	}
 	close(server_socket);
 	for(i = 0;i < PLAYER_MAX;i++){

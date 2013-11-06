@@ -4,8 +4,15 @@
 #define PLAYER_MAX 4
 #define MAP_WIDTH 50
 #define MAP_HEIGHT 20
-#define GAME_TIME 3000
-#define MAP_SEND_INTERVAL 120 
+#define GAME_TIME 30000
+#define MAP_SEND_INTERVAL 200
+
+typedef enum _Player{
+	RED,
+	GREEN,
+	YELLOW,
+	BLUE
+} Player;
 
 typedef enum _Color{
     EMPTY,
@@ -35,6 +42,16 @@ typedef enum _Direction{
     UNKNOWN
 } Direction;
 
+
+typedef enum _Command{
+    REGISTER_PLAYER,
+    START_GAME,
+    SEND_MAP,
+    TIME_UPDATE,
+    FINISH_GAME,
+    
+    SEND_DIRECTION
+} Command;
 
 typedef struct _Position{
 	char x,y;

@@ -1,29 +1,30 @@
+// 汎用ライブラリ
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/ioctl.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <ncurses.h>
-#include <pthread.h>
 #include <errno.h>
 
+// ネットワークライブラリ
+#include <sys/socket.h>
+#include <sys/ioctl.h>
+#include <arpa/inet.h>
+
+// ncurses
+#include <ncurses.h>
+
+// スレッド
+#include <pthread.h>
+
+// 陣取りゲームのクライアント／サーバー共通定義
 #include "Jindef.h"
 
 #define SOCKET_ERROR -1
-#define RECV_INTERVAL_MILLISECONDS 200
 
-/**
- * サーバーから来る命令内容
- */
-typedef enum
-{
-    MAP_DATA, // マップデータ受信
-    END_GAME // ゲーム終了
-} Command;
+// ゲームプレイ中かどうか
+// プレイ中なら1, ゲームが終了したら0になる
+// メインスレッドと描画スレッドの連絡を取るために
+// グローバル変数にしてある
+int is_playing;
 
 /**
  * サーバーからくる初期データ
@@ -36,14 +37,42 @@ typedef struct
 } StartData;
 
 /**
+ * ゲーム終了後の成績データ
+ */
+typedef struct
+{
+    Color color;
+    int tile_count;
+} ScoreData;
+
+/**
+ * サーバーにコマンドを送る
+ */
+void send_command(int sock, Command command)
+{
+    char message[] = {command};
+    write(sock, message, sizeof(message));
+}
+
+/**
+ * サーバーから次のコマンドを受け取る
+ */
+Command recv_command(int sock)
+{
+    char command;
+    read(sock, &command, 1);
+    return command;
+}
+
+/**
  * サーバーに自分が進んだ方向を送る
  * @param sock サーバーのソケット
- * @param color 自分の色
  * @param dir 進んだ方向
  */
-void send_move(int sock, Color color, Direction dir)
+void send_move(int sock, Direction dir)
 {
-    char message[2] = {color, dir};
+    send_command(sock, SEND_DIRECTION);
+    char message[] = {dir};
     write(sock, message, sizeof(message));
 }
 
@@ -54,7 +83,13 @@ void send_move(int sock, Color color, Direction dir)
  */
 void recv_start_data(int sock, StartData* output_data)
 {
+    if (recv_command(sock) != REGISTER_PLAYER) {
+        perror("register player command expected. but other command was received");
+        exit(1);
+    }
     read(sock, &(output_data->color), 1);
+    // サーバーからくる色の番号は0始まりだが,
+    // ncursesの色ペアは1始まりなので，＋1する
     output_data->color++;
     read(sock, &(output_data->x), 1);
     read(sock, &(output_data->y), 1);
@@ -68,15 +103,16 @@ void init_ncurses()
     initscr();
     cbreak();
     noecho();
-    curs_set(0);
-    keypad(stdscr, TRUE);
+    curs_set(0); // カーソル非表示
+    keypad(stdscr, TRUE); // 十字キーを有効化
+    nodelay(stdscr, TRUE); // getchなどの入力関数を非同期にする
 
-    start_color();
+    start_color(); // 色を有効化
     init_pair(1, COLOR_WHITE, COLOR_RED);
     init_pair(2, COLOR_WHITE, COLOR_GREEN);
     init_pair(3, COLOR_WHITE, COLOR_YELLOW);
     init_pair(4, COLOR_WHITE, COLOR_BLUE);
-    init_pair(5, COLOR_WHITE, COLOR_CYAN);
+    init_pair(5, COLOR_WHITE, COLOR_CYAN); // 背景色
 }
 
 /**
@@ -96,11 +132,13 @@ void exit_ncurses()
 void draw_tile(Color tile, int x, int y)
 {
     int draw_color_pair;
+    // 左から 何もない場所，軌跡，プレイヤー
     char draw_chars[] = {' ', ' ', '@'};
     char draw_char;
     int index = tile > 0 ? (int)((tile - 1) / 4) : 0;
+    int color_id = tile > 0 ? (tile - 1) % 4 + 1 : 5;
 
-    draw_color_pair = COLOR_PAIR(tile > 0 ? (tile - 1) % 4 + 1 : 5);
+    draw_color_pair = COLOR_PAIR(color_id);
     draw_char = draw_chars[index];
 
     attron(draw_color_pair);
@@ -153,33 +191,6 @@ Direction input_dir()
     }
 }
 
-
-/**
- * 指定したソケットから確実にlengthバイト分readする
- * @return 途中で失敗した場合は0を返す
- * 成功したら1を返す
- */
-int recv_complete_nonblocking(int sock, char* buf, int length)
-{
-    int total_read_count = 0;
-    int recv_result;
-
-    while (total_read_count < length) {
-        recv_result = read(sock, buf + total_read_count, length - total_read_count);
-        if (recv_result < 1) {
-            if (errno == EAGAIN) {
-                refresh();
-                usleep(RECV_INTERVAL_MILLISECONDS * 1000);
-            }
-            else {
-                return 0;
-            }
-            total_read_count += recv_result;
-        }
-    }
-    return 1;
-}
-
 /**
  * 指定したソケットから確実にlengthバイト分readする
  * @return 途中で失敗した場合は0を返す
@@ -193,31 +204,106 @@ int recv_complete(int sock, char* buf, int length)
     while (total_read_count < length) {
         recv_result = read(sock, buf + total_read_count, length - total_read_count);
         if (recv_result < 1) {
-                return 0;
+            return FALSE;
         }
         total_read_count += recv_result;
         refresh();
     }
-    return 1;
+    return TRUE;
 }
 
 /**
+ * ゲーム結果をサーバーから受け取る
+ * @param sock サーバーのソケット
+ * @param sorted_scores 結果を格納する成績データの配列 成績の高い順にソートされている
+ */
+void recv_result_scores(int sock, ScoreData sorted_scores[])
+{
+    int i, k;
+    int temp;
+    short scores[PLAYER_MAX];
+    read(sock, scores, sizeof(scores));
+    int sorted_colors[] = {0, 1, 2, 3};
+
+    for (i = 0; i < PLAYER_MAX - 1; i++) {
+        for (k = 0; k <PLAYER_MAX - 1; k++) {
+            if (scores[k] < scores[k+1]) {
+                temp = sorted_colors[k];
+                sorted_colors[k] = sorted_colors[k+1];
+                sorted_colors[k+1] = temp;
+
+                temp = scores[k];
+                scores[k] = scores[k+1];
+                scores[k+1] = temp;
+            }
+        }
+    }
+
+    for (i = 0; i < PLAYER_MAX; i++) {
+        sorted_scores[i].color = sorted_colors[i] + 1;
+        sorted_scores[i].tile_count = scores[i];
+    }
+}
+/**
  * 別スレッドで実行される，マップ描画関数
+ * @param sock スレッドの引数は必ずポインタなので，サーバーのソケットへのポインタである
  */
 void draw_map_thread(int* sock)
 {
-    char map_data[MAP_WIDTH * MAP_HEIGHT];
-    int val = 1;
+    const int MAP_SIZE = MAP_WIDTH * MAP_HEIGHT;
+    char map_data[MAP_SIZE];
     int recv_result;
+    char command;
 
     while (1) {
-        recv_result = recv_complete(*sock, map_data, MAP_WIDTH * MAP_HEIGHT);
-        if (recv_result != 1) {
-            perror("recv_complete_nonblocking");
-            break;
+        command = recv_command(*sock);
+        if (command == FINISH_GAME) break;
+        if (command == SEND_MAP) {
+            // マップデータは長いのでTCPの仕様により複数のreadに分割されることがある
+            // よって確実に受取る関数を使っている
+            recv_result = recv_complete(*sock, map_data, MAP_SIZE);
+            if (recv_result == FALSE) {
+                perror("recv_complete");
+                break;
+            }
+            draw_map(map_data);
         }
-        draw_map(map_data);
     }
+    // ゲーム終了をメインスレッドに知らせるために
+    // グローバル変数を書き換える
+    is_playing = 0;
+}
+
+/**
+ * ncursesの画面に自分の色が何色か表示する
+ * @param color 自分の色
+ */
+void show_my_color(Color color)
+{
+    attron(COLOR_PAIR(color));
+    mvprintw(5, MAP_WIDTH + 1, "%c", ' '); 
+    attroff(COLOR_PAIR(color));
+    mvprintw(5, MAP_WIDTH + 2, "<= your color");
+}
+
+void show_result(ScoreData score_data[], Color my_color)
+{
+    int i;
+
+    erase();
+    refresh();
+    mvprintw(9, 10, "FINISH GAME!!");
+    for (i = 0; i < PLAYER_MAX; i++) {
+        mvprintw(11+i, 8, "%d ", i+1);
+        attron(COLOR_PAIR(score_data[i].color));
+        mvprintw(11+i, 10, "%c", ' ');
+        attroff(COLOR_PAIR(score_data[i].color));
+        mvprintw(11+i, 11, ": %d tiles", score_data[i].tile_count);
+        if (score_data[i].color == my_color) {
+            mvprintw(11+i, 22, "<= You!");
+        }
+    }
+    mvprintw(11+PLAYER_MAX+1, 10, "Press enter to exit game. thank you for playing!");
 }
 
 /**
@@ -225,22 +311,39 @@ void draw_map_thread(int* sock)
  */
 void start_game(int sock, const StartData* start_data)
 {
-    Color color = start_data->color;
-    Direction dir;
-    int x = start_data->x;
-    int y = start_data->y;
     pthread_t draw_thread_id;
+    Direction dir;
+    ScoreData score_data[PLAYER_MAX];
+    char trash_buf[10];
 
+    // ncurses初期化
     init_ncurses();
 
+    // 自分の色を表示
+    show_my_color(start_data->color);
+    
+    // 描画スレッドを開始
+    is_playing = 1;
     pthread_create(&draw_thread_id, NULL, (void*)draw_map_thread, &sock);
 
-    while (1) {
+    // ゲームプレイ中はずっと入力を待ち続ける（いわゆるゲームループ）
+    while (is_playing) {
         dir = input_dir();
         if (dir != UNKNOWN) {
-            send_move(sock, color, dir);
+            send_move(sock, dir);
         }
     } 
+    // ゲームが終了したので入力を同期処理に戻す
+    nodelay(stdscr, FALSE);
+
+    // 結果をサーバーから受け取り，表示する
+    recv_result_scores(sock, score_data);
+
+    // ゲーム結果を表示する
+    show_result(score_data, start_data->color);
+
+    // Enterキーが押されるまで待機
+    getstr(trash_buf);
 
     exit_ncurses();
 }
@@ -274,13 +377,26 @@ int connect_server(const char* ip_addr, unsigned short server_port)
 }
 
 /**
+ * ゲーム開始の合図を待つ
+ */
+void wait_game_start(int sock)
+{
+    char command;
+    read(sock, &command, 1);
+    // ゲーム開始の合図以外が最初に来てしまったらエラーを出して終了する
+    if (command != START_GAME) {
+        perror("wait start game");
+        exit(1);
+    }
+}
+
+/**
  * メイン関数
  */
 int main(int argc, char* argv[])
 {
     int sock;
     int forked_pid;
-    char command;
     StartData start_data;
 
     if (argc != 3) {
@@ -298,24 +414,13 @@ int main(int argc, char* argv[])
     printf("received start_data\n");
     printf("your color: %d\n", start_data.color);
     printf("your position: (%d, %d)\n", start_data.x, start_data.y);
+
+    // ゲーム開始の合図を待つ
+    wait_game_start(sock);
     
     // ゲームスタート
     start_game(sock, &start_data);
 
-    /*
-    // forkしてキー入力プロセスとネットワークプロセスに分離する
-    forked_pid = fork();
-    if (forked_pid == 0) {
-        // 子プロセスの場合，時間表示プロセス
-        // TODO
-    }
-    else if (forked_pid > 0) {
-        // 親プロセスの場合, ゲームプロセス
-        start_game(sock, &start_data);
-    }
-    */
-
     close(sock);
-
     return 0;
 }
