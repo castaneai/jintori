@@ -42,7 +42,7 @@ typedef struct
 typedef struct
 {
     Color color;
-    int tile_count; // 取った陣の数
+    int tile_count;
 } ScoreData;
 
 /**
@@ -105,6 +105,7 @@ void init_ncurses()
     noecho();
     curs_set(0); // カーソル非表示
     keypad(stdscr, TRUE); // 十字キーを有効化
+    nodelay(stdscr, TRUE); // getchなどの入力関数を非同期にする
 
     start_color(); // 色を有効化
     init_pair(1, COLOR_WHITE, COLOR_RED);
@@ -132,7 +133,7 @@ void draw_tile(Color tile, int x, int y)
 {
     int draw_color_pair;
     // 左から 何もない場所，軌跡，プレイヤー
-    char draw_chars[] = {' ', ' ', '@'};
+    char draw_chars[] = {' ', '.', '@'};
     char draw_char;
     int index = tile > 0 ? (int)((tile - 1) / 4) : 0;
     int color_id = tile > 0 ? (tile - 1) % 4 + 1 : 5;
@@ -206,6 +207,7 @@ int recv_complete(int sock, char* buf, int length)
             return FALSE;
         }
         total_read_count += recv_result;
+        refresh();
     }
     return TRUE;
 }
@@ -220,12 +222,9 @@ void recv_result_scores(int sock, ScoreData sorted_scores[])
     int i, k;
     int temp;
     short scores[PLAYER_MAX];
-    int sorted_colors[] = {1, 2, 3, 4};
-
-    // サーバーからソートされていない結果データを受け取る
     read(sock, scores, sizeof(scores));
+    int sorted_colors[] = {0, 1, 2, 3};
 
-    // バブルソート
     for (i = 0; i < PLAYER_MAX - 1; i++) {
         for (k = 0; k <PLAYER_MAX - 1; k++) {
             if (scores[k] < scores[k+1]) {
@@ -240,9 +239,8 @@ void recv_result_scores(int sock, ScoreData sorted_scores[])
         }
     }
 
-    // ソートされた成績データ配列を作る
     for (i = 0; i < PLAYER_MAX; i++) {
-        sorted_scores[i].color = sorted_colors[i];
+        sorted_scores[i].color = sorted_colors[i] + 1;
         sorted_scores[i].tile_count = scores[i];
     }
 }
@@ -256,10 +254,19 @@ void draw_map_thread(int* sock)
     char map_data[MAP_SIZE];
     int recv_result;
     char command;
+	int left_time;
 
-    while (1) {
+	while (1) {
         command = recv_command(*sock);
         if (command == FINISH_GAME) break;
+		if (command == TIME_UPDATE){
+			recv_result = recv_complete(*sock, (char *)&left_time, sizeof(int));
+			if(recv_result == FALSE){
+				perror("recv_complete");
+				break;
+			}
+   			mvprintw(6, MAP_WIDTH + 2, "%d seconds left", left_time/1000);
+		}
         if (command == SEND_MAP) {
             // マップデータは長いのでTCPの仕様により複数のreadに分割されることがある
             // よって確実に受取る関数を使っている
@@ -288,16 +295,12 @@ void show_my_color(Color color)
     mvprintw(5, MAP_WIDTH + 2, "<= your color");
 }
 
-/**
- * ゲーム結果を表示する
- * @param score_data ゲーム結果
- * @param my_color 自身の色
- */
 void show_result(ScoreData score_data[], Color my_color)
 {
     int i;
 
     erase();
+    refresh();
     mvprintw(9, 10, "FINISH GAME!!");
     for (i = 0; i < PLAYER_MAX; i++) {
         mvprintw(11+i, 8, "%d ", i+1);
@@ -332,8 +335,6 @@ void start_game(int sock, const StartData* start_data)
     is_playing = 1;
     pthread_create(&draw_thread_id, NULL, (void*)draw_map_thread, &sock);
 
-    // getchなどの入力関数を非同期にする
-    nodelay(stdscr, TRUE); 
     // ゲームプレイ中はずっと入力を待ち続ける（いわゆるゲームループ）
     while (is_playing) {
         dir = input_dir();
@@ -341,11 +342,11 @@ void start_game(int sock, const StartData* start_data)
             send_move(sock, dir);
         }
     } 
-    // 描画スレッドの終了を待機
-    pthread_join(draw_thread_id, NULL);
-
     // ゲームが終了したので入力を同期処理に戻す
     nodelay(stdscr, FALSE);
+
+	//getstrが下キーで終了しないようにする
+	keypad(stdscr, FALSE);
 
     // 結果をサーバーから受け取り，表示する
     recv_result_scores(sock, score_data);
@@ -356,7 +357,6 @@ void start_game(int sock, const StartData* start_data)
     // Enterキーが押されるまで待機
     getstr(trash_buf);
 
-    // ncurses終了
     exit_ncurses();
 }
 
@@ -393,8 +393,10 @@ int connect_server(const char* ip_addr, unsigned short server_port)
  */
 void wait_game_start(int sock)
 {
+    char command;
+    read(sock, &command, 1);
     // ゲーム開始の合図以外が最初に来てしまったらエラーを出して終了する
-    if (recv_command(sock) != START_GAME) {
+    if (command != START_GAME) {
         perror("wait start game");
         exit(1);
     }
